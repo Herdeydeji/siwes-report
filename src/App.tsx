@@ -57,7 +57,7 @@ function AppContent() {
 
   const [currentPath, setCurrentPath] = useState<string>(() => {
     if (typeof window !== 'undefined') {
-      if (import.meta.env.DEV) {
+      if (import.meta.env.DEV && !import.meta.env.PROD) {
         const params = new URLSearchParams(window.location.search);
         if (params.get('preview')) {
           return `/${params.get('preview')}`;
@@ -72,7 +72,7 @@ function AppContent() {
   });
 
   const [simulatedRole, setSimulatedRole] = useState<UserRole>(() => {
-    if (typeof window !== 'undefined' && import.meta.env.DEV) {
+    if (typeof window !== 'undefined' && import.meta.env.DEV && !import.meta.env.PROD) {
       const params = new URLSearchParams(window.location.search);
       if (params.get('preview') || params.get('autostart') === '1') {
         return 'student';
@@ -105,7 +105,7 @@ function AppContent() {
     const publicPaths = ['/', '/pricing', '/login', '/register', '/forgot-password'];
     const publicAuthPaths = ['/login', '/register', '/forgot-password'];
     const studentProtectedPaths = ['/dashboard', '/reports', '/settings', '/onboarding', '/verify-email'];
-    const isDevPreviewActive = import.meta.env.DEV && simulatedRole !== 'guest';
+    const isDevPreviewActive = import.meta.env.DEV && !import.meta.env.PROD && simulatedRole !== 'guest';
 
     // 1. If authenticated user arrives on login/register/forgot-password:
     if (currentUser && publicAuthPaths.includes(currentPath)) {
@@ -170,12 +170,12 @@ function AppContent() {
     ? activeUserProfile.role === 'admin'
       ? 'admin'
       : 'student'
-    : import.meta.env.DEV
+    : import.meta.env.DEV && !import.meta.env.PROD
       ? simulatedRole
       : 'guest';
 
   const handleRoleChange = (role: UserRole) => {
-    if (!import.meta.env.DEV) return;
+    if (!import.meta.env.DEV || import.meta.env.PROD) return;
     setSimulatedRole(role);
     if (role === 'guest' && (currentPath.startsWith('/dashboard') || currentPath.startsWith('/reports') || currentPath.startsWith('/admin'))) {
       navigate('/');
@@ -214,7 +214,7 @@ function AppContent() {
   }
 
   // Defense-in-depth render gate: prevent flashing protected student views before redirect completes
-  const isDevPreviewActive = import.meta.env.DEV && !currentUser && simulatedRole !== 'guest';
+  const isDevPreviewActive = import.meta.env.DEV && !import.meta.env.PROD && !currentUser && simulatedRole !== 'guest';
   const canEnterStudentWorkspace =
     isDevPreviewActive ||
     Boolean(currentUser && isEmailVerified && (onboardingCompleted || userProfile?.role === 'admin'));
@@ -353,13 +353,15 @@ function AppContent() {
         </AdminLayout>
       )}
 
-      {/* Development UI Route Inspector */}
-      <RoleSimulatorBar
-        currentRole={actualRole}
-        onRoleChange={handleRoleChange}
-        currentPath={currentPath}
-        onNavigate={navigate}
-      />
+      {/* Development UI Route Inspector (completely excluded from production builds) */}
+      {import.meta.env.DEV && !import.meta.env.PROD && (
+        <RoleSimulatorBar
+          currentRole={actualRole}
+          onRoleChange={handleRoleChange}
+          currentPath={currentPath}
+          onNavigate={navigate}
+        />
+      )}
     </>
   );
 }

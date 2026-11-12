@@ -23,7 +23,7 @@ export function RoleSimulatorBar({
   const [isExpanded, setIsExpanded] = useState(false);
 
   // In production builds, never render the simulator bar
-  if (!import.meta.env.DEV) {
+  if (!import.meta.env.DEV || import.meta.env.PROD) {
     return null;
   }
 
