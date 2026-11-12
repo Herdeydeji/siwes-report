@@ -22,7 +22,50 @@ import {
 } from 'firebase/firestore';
 import { auth, db } from './config';
 import { handleFirestoreError, OperationType } from './errors';
-import { UserProfile } from '../types';
+import { StudentPlacementInfo, UserProfile } from '../types';
+
+const ALLOWED_STUDENT_EDITABLE_FIELDS = new Set([
+  'fullName',
+  'phoneNumber',
+  'institution',
+  'faculty',
+  'department',
+  'programme',
+  'matricNumber',
+  'academicLevel',
+  'academicSession',
+  'placement',
+  'avatarUrl',
+]);
+
+function boundString(value: unknown, maxLen: number): string {
+  if (typeof value !== 'string') return '';
+  return value.trim().slice(0, maxLen);
+}
+
+function sanitizePlacement(placement?: Partial<StudentPlacementInfo>): StudentPlacementInfo {
+  const safe: StudentPlacementInfo = {
+    organisationName: boundString(placement?.organisationName, 150),
+  };
+
+  if (placement?.organisationAddress !== undefined) {
+    safe.organisationAddress = boundString(placement.organisationAddress, 250);
+  }
+  if (placement?.supervisorName !== undefined) {
+    safe.supervisorName = boundString(placement.supervisorName, 120);
+  }
+  if (placement?.supervisorDesignation !== undefined) {
+    safe.supervisorDesignation = boundString(placement.supervisorDesignation, 100);
+  }
+  if (placement?.startDate !== undefined) {
+    safe.startDate = boundString(placement.startDate, 30);
+  }
+  if (placement?.endDate !== undefined) {
+    safe.endDate = boundString(placement.endDate, 30);
+  }
+
+  return safe;
+}
 
 /**
  * Registers a new student account, initializes their Firestore profile with role 'student',
@@ -33,22 +76,25 @@ export async function registerStudent(
   password: string,
   fullName: string
 ): Promise<{ user: User; profile: UserProfile }> {
+  const cleanFullName = boundString(fullName, 120);
+  const cleanEmail = boundString(email, 120);
+
   // 1. Create account in Firebase Auth
-  const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
+  const credential = await createUserWithEmailAndPassword(auth, cleanEmail, password);
   const user = credential.user;
 
   // 2. Set Auth display name
   try {
-    await updateProfile(user, { displayName: fullName.trim() });
+    await updateProfile(user, { displayName: cleanFullName });
   } catch (err) {
     console.warn('Could not update Auth displayName immediately:', err);
   }
 
-  // 3. Create initial Firestore profile (role is strictly student; cannot self-assign admin)
+  // 3. Create initial Firestore profile (role is strictly student; verification & onboarding start false)
   const initialProfile: UserProfile = {
     uid: user.uid,
-    fullName: fullName.trim(),
-    email: user.email || email.trim(),
+    fullName: cleanFullName,
+    email: boundString(user.email || cleanEmail, 120),
     role: 'student',
     emailVerified: false,
     onboardingCompleted: false,
@@ -103,7 +149,7 @@ export async function resendStudentEmailVerification(user: User): Promise<void> 
 }
 
 /**
- * Reloads the current user from Firebase Auth to get the latest emailVerified status
+ * Reloads the current user from Firebase Auth to get the authoritative emailVerified status
  */
 export async function reloadStudentUser(user: User): Promise<User> {
   await reload(user);
@@ -111,7 +157,9 @@ export async function reloadStudentUser(user: User): Promise<User> {
 }
 
 /**
- * Fetches the user profile document from Firestore
+ * Fetches the user profile document from Firestore.
+ * Note: emailVerified from Firestore is never used to grant auth verification;
+ * Firebase Authentication (`auth.currentUser.emailVerified`) is the sole source of truth.
  */
 export async function getStudentProfile(uid: string): Promise<UserProfile | null> {
   const userPath = `users/${uid}`;
@@ -127,7 +175,7 @@ export async function getStudentProfile(uid: string): Promise<UserProfile | null
       email: data.email || '',
       phoneNumber: data.phoneNumber || '',
       role: data.role === 'admin' ? 'admin' : 'student',
-      emailVerified: Boolean(data.emailVerified),
+      emailVerified: Boolean(auth.currentUser?.uid === uid ? auth.currentUser.emailVerified : false),
       onboardingCompleted: Boolean(data.onboardingCompleted),
       institution: data.institution || '',
       faculty: data.faculty || '',
@@ -147,7 +195,8 @@ export async function getStudentProfile(uid: string): Promise<UserProfile | null
 }
 
 /**
- * Saves onboarding data to the student's Firestore profile and marks onboardingCompleted: true
+ * Saves onboarding data to the student's Firestore profile and marks onboardingCompleted: true.
+ * Server-side Firestore rules verify email_verified == true and completeness of mandatory fields.
  */
 export async function saveStudentOnboarding(
   uid: string,
@@ -156,22 +205,19 @@ export async function saveStudentOnboarding(
   const userPath = `users/${uid}`;
   try {
     const updatePayload: Record<string, any> = {
-      fullName: onboardingData.fullName,
-      phoneNumber: onboardingData.phoneNumber || '',
-      institution: onboardingData.institution,
-      faculty: onboardingData.faculty,
-      department: onboardingData.department,
-      programme: onboardingData.programme,
-      matricNumber: onboardingData.matricNumber,
-      academicLevel: onboardingData.academicLevel,
-      academicSession: onboardingData.academicSession,
+      fullName: boundString(onboardingData.fullName, 120),
+      phoneNumber: boundString(onboardingData.phoneNumber || '', 20),
+      institution: boundString(onboardingData.institution, 150),
+      faculty: boundString(onboardingData.faculty, 100),
+      department: boundString(onboardingData.department, 100),
+      programme: boundString(onboardingData.programme, 100),
+      matricNumber: boundString(onboardingData.matricNumber, 50),
+      academicLevel: boundString(onboardingData.academicLevel, 30),
+      academicSession: boundString(onboardingData.academicSession, 30),
+      placement: sanitizePlacement(onboardingData.placement),
       onboardingCompleted: true,
       updatedAt: serverTimestamp(),
     };
-
-    if (onboardingData.placement) {
-      updatePayload.placement = onboardingData.placement;
-    }
 
     await updateDoc(doc(db, 'users', uid), updatePayload);
   } catch (error) {
@@ -180,7 +226,9 @@ export async function saveStudentOnboarding(
 }
 
 /**
- * Updates an existing student's profile fields in Firestore
+ * Updates an existing student's allowlisted personal, academic, or placement fields in Firestore.
+ * Privileged/immutable fields (role, uid, email, emailVerified, onboardingCompleted, createdAt)
+ * are strictly stripped on the client and rejected by Firestore security rules.
  */
 export async function updateStudentProfile(
   uid: string,
@@ -188,12 +236,35 @@ export async function updateStudentProfile(
 ): Promise<void> {
   const userPath = `users/${uid}`;
   try {
-    // Protect role against client tampering
-    const { role, uid: _, createdAt: __, ...safeFields } = fields as any;
-    await updateDoc(doc(db, 'users', uid), {
-      ...safeFields,
+    const safeUpdate: Record<string, any> = {
       updatedAt: serverTimestamp(),
-    });
+    };
+
+    const stringLimits: Record<string, number> = {
+      fullName: 120,
+      phoneNumber: 20,
+      institution: 150,
+      faculty: 100,
+      department: 100,
+      programme: 100,
+      matricNumber: 50,
+      academicLevel: 30,
+      academicSession: 30,
+      avatarUrl: 500,
+    };
+
+    for (const [key, value] of Object.entries(fields)) {
+      if (!ALLOWED_STUDENT_EDITABLE_FIELDS.has(key) || value === undefined) {
+        continue;
+      }
+      if (key === 'placement' && typeof value === 'object' && value !== null) {
+        safeUpdate.placement = sanitizePlacement(value as Partial<StudentPlacementInfo>);
+      } else if (key in stringLimits) {
+        safeUpdate[key] = boundString(value, stringLimits[key]);
+      }
+    }
+
+    await updateDoc(doc(db, 'users', uid), safeUpdate);
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, userPath);
   }

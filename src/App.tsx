@@ -49,7 +49,6 @@ function AppContent() {
   const {
     currentUser,
     userProfile,
-    isLoading: isAuthLoading,
     isAuthReady,
     isEmailVerified,
     onboardingCompleted,
@@ -58,12 +57,14 @@ function AppContent() {
 
   const [currentPath, setCurrentPath] = useState<string>(() => {
     if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      if (import.meta.env.DEV && params.get('preview')) {
-        return `/${params.get('preview')}`;
-      }
-      if (params.get('autostart') === '1') {
-        return '/dashboard';
+      if (import.meta.env.DEV) {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('preview')) {
+          return `/${params.get('preview')}`;
+        }
+        if (params.get('autostart') === '1') {
+          return '/dashboard';
+        }
       }
       return window.location.pathname || '/';
     }
@@ -71,12 +72,9 @@ function AppContent() {
   });
 
   const [simulatedRole, setSimulatedRole] = useState<UserRole>(() => {
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && import.meta.env.DEV) {
       const params = new URLSearchParams(window.location.search);
-      if (import.meta.env.DEV && params.get('preview')) {
-        return 'student';
-      }
-      if (params.get('autostart') === '1') {
+      if (params.get('preview') || params.get('autostart') === '1') {
         return 'student';
       }
     }
@@ -100,18 +98,20 @@ function AppContent() {
     }
   };
 
-  // Automated Authentication & Onboarding Route Redirection (Section 10)
+  // Automated Authentication & Onboarding Route Redirection
   useEffect(() => {
     if (!isAuthReady) return;
 
+    const publicPaths = ['/', '/pricing', '/login', '/register', '/forgot-password'];
     const publicAuthPaths = ['/login', '/register', '/forgot-password'];
     const studentProtectedPaths = ['/dashboard', '/reports', '/settings', '/onboarding', '/verify-email'];
+    const isDevPreviewActive = import.meta.env.DEV && simulatedRole !== 'guest';
 
-    // 1. If authenticated user arrives on login/register:
+    // 1. If authenticated user arrives on login/register/forgot-password:
     if (currentUser && publicAuthPaths.includes(currentPath)) {
       if (!isEmailVerified) {
         navigate('/verify-email');
-      } else if (!onboardingCompleted) {
+      } else if (!onboardingCompleted && userProfile?.role !== 'admin') {
         navigate('/onboarding');
       } else {
         navigate('/dashboard');
@@ -119,23 +119,23 @@ function AppContent() {
       return;
     }
 
-    // 2. If unauthenticated user tries to access protected student paths without dev simulation:
-    if (!currentUser && simulatedRole === 'guest' && studentProtectedPaths.some((p) => currentPath.startsWith(p))) {
+    // 2. If unauthenticated user tries to access protected student paths (unless dev preview bar explicitly toggled in DEV):
+    if (!currentUser && !isDevPreviewActive && studentProtectedPaths.some((p) => currentPath.startsWith(p))) {
       navigate('/login');
       return;
     }
 
-    // 3. If authenticated user is NOT verified yet, and is trying to access protected workspace:
+    // 3. If authenticated user is NOT verified yet, block protected student/admin workspace:
     if (currentUser && !isEmailVerified) {
-      if (currentPath !== '/verify-email' && !publicAuthPaths.includes(currentPath) && currentPath !== '/') {
+      if (currentPath !== '/verify-email' && !publicPaths.includes(currentPath)) {
         navigate('/verify-email');
         return;
       }
     }
 
-    // 4. If authenticated & verified user has NOT completed onboarding yet:
-    if (currentUser && isEmailVerified && !onboardingCompleted) {
-      if (currentPath !== '/onboarding' && !publicAuthPaths.includes(currentPath) && currentPath !== '/') {
+    // 4. If authenticated & verified student has NOT completed onboarding yet, route to /onboarding:
+    if (currentUser && isEmailVerified && !onboardingCompleted && userProfile?.role !== 'admin') {
+      if (currentPath !== '/onboarding' && !publicPaths.includes(currentPath)) {
         navigate('/onboarding');
         return;
       }
@@ -148,26 +148,34 @@ function AppContent() {
         return;
       }
     }
-  }, [currentUser, isAuthReady, isEmailVerified, onboardingCompleted, currentPath]);
+  }, [currentUser, userProfile, isAuthReady, isEmailVerified, onboardingCompleted, currentPath, simulatedRole]);
 
-  // Derive active user identity
-  const activeUserProfile: UserProfile = userProfile || {
-    uid: currentUser?.uid || 'guest-uid',
-    fullName: currentUser?.displayName || 'Student User',
-    email: currentUser?.email || '',
-    role: 'student',
-    emailVerified: Boolean(currentUser?.emailVerified),
-    onboardingCompleted: false,
-  };
+  // Derive active user identity strictly using Firebase Auth verification state
+  const activeUserProfile: UserProfile = userProfile
+    ? {
+        ...userProfile,
+        emailVerified: Boolean(currentUser?.emailVerified),
+      }
+    : {
+        uid: currentUser?.uid || 'guest-uid',
+        fullName: currentUser?.displayName || 'Student User',
+        email: currentUser?.email || '',
+        role: 'student',
+        emailVerified: Boolean(currentUser?.emailVerified),
+        onboardingCompleted: false,
+      };
 
-  // Determine actual role
+  // Determine actual role (simulatedRole only takes effect in DEV when signed out)
   const actualRole: UserRole = currentUser
     ? activeUserProfile.role === 'admin'
       ? 'admin'
       : 'student'
-    : simulatedRole;
+    : import.meta.env.DEV
+      ? simulatedRole
+      : 'guest';
 
   const handleRoleChange = (role: UserRole) => {
+    if (!import.meta.env.DEV) return;
     setSimulatedRole(role);
     if (role === 'guest' && (currentPath.startsWith('/dashboard') || currentPath.startsWith('/reports') || currentPath.startsWith('/admin'))) {
       navigate('/');
@@ -196,14 +204,20 @@ function AppContent() {
   const matched = matchRoute(currentPath);
   const route = matched.route;
 
-  // Global loading state while checking initial Firebase auth token
-  if (!isAuthReady && isAuthLoading) {
+  // Global loading state while restoring initial Firebase auth session
+  if (!isAuthReady) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#F8F9FA]">
         <PageLoading message="Connecting to SIWES Studio..." />
       </div>
     );
   }
+
+  // Defense-in-depth render gate: prevent flashing protected student views before redirect completes
+  const isDevPreviewActive = import.meta.env.DEV && !currentUser && simulatedRole !== 'guest';
+  const canEnterStudentWorkspace =
+    isDevPreviewActive ||
+    Boolean(currentUser && isEmailVerified && (onboardingCompleted || userProfile?.role === 'admin'));
 
   // View resolution
   const renderView = () => {
@@ -226,12 +240,21 @@ function AppContent() {
 
       // Student Auth & Onboarding Routes
       case '/verify-email':
+        if (!currentUser && !isDevPreviewActive) {
+          return <PageLoading message="Redirecting to Sign In..." />;
+        }
         return <VerifyEmailView onNavigate={navigate} />;
       case '/onboarding':
+        if (!isDevPreviewActive && (!currentUser || !isEmailVerified)) {
+          return <PageLoading message="Verifying account status..." />;
+        }
         return <StudentOnboardingView onNavigate={navigate} />;
 
-      // Student Workspace Routes
+      // Student Workspace Routes (strictly require verified Auth + completed onboarding)
       case '/dashboard':
+        if (!canEnterStudentWorkspace) {
+          return <PageLoading message="Checking verification & onboarding..." />;
+        }
         return (
           <StudentDashboardView
             user={activeUserProfile}
@@ -240,8 +263,14 @@ function AppContent() {
           />
         );
       case '/reports':
+        if (!canEnterStudentWorkspace) {
+          return <PageLoading message="Checking verification & onboarding..." />;
+        }
         return <ReportsListView reports={reports} onNavigate={navigate} />;
       case '/reports/new':
+        if (!canEnterStudentWorkspace) {
+          return <PageLoading message="Checking verification & onboarding..." />;
+        }
         return (
           <NewReportWizardView
             user={activeUserProfile}
@@ -250,6 +279,9 @@ function AppContent() {
           />
         );
       case '/reports/:reportId':
+        if (!canEnterStudentWorkspace) {
+          return <PageLoading message="Checking verification & onboarding..." />;
+        }
         return (
           <ReportDetailView
             reportId={matched.params.reportId || 'rep-101'}
@@ -258,6 +290,9 @@ function AppContent() {
           />
         );
       case '/settings':
+        if (!canEnterStudentWorkspace) {
+          return <PageLoading message="Checking verification & onboarding..." />;
+        }
         return <StudentSettingsView onNavigate={navigate} />;
 
       // Administration Routes

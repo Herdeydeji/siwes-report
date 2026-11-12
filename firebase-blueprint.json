@@ -5,9 +5,9 @@
       "description": "Student or administrator account profile in SIWES Studio",
       "type": "object",
       "properties": {
-        "uid": { "type": "string", "description": "Firebase Auth UID" },
-        "fullName": { "type": "string", "maxLength": 120 },
-        "email": { "type": "string", "maxLength": 120 },
+        "uid": { "type": "string", "maxLength": 128, "description": "Firebase Auth UID" },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "email": { "type": "string", "minLength": 3, "maxLength": 120 },
         "phoneNumber": { "type": "string", "maxLength": 20 },
         "role": { "type": "string", "enum": ["student", "admin"] },
         "emailVerified": { "type": "boolean" },
@@ -19,6 +19,7 @@
         "matricNumber": { "type": "string", "maxLength": 50 },
         "academicLevel": { "type": "string", "maxLength": 30 },
         "academicSession": { "type": "string", "maxLength": 30 },
+        "avatarUrl": { "type": "string", "maxLength": 500 },
         "placement": {
           "type": "object",
           "properties": {
@@ -33,13 +34,28 @@
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["uid", "fullName", "email", "role"]
+      "required": ["uid", "fullName", "email", "role", "emailVerified", "onboardingCompleted", "createdAt", "updatedAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Server-controlled administrator authorization marker document",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 120 },
+        "grantedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "UserProfile",
-      "description": "Stores user profiles with isolated student data and immutable roles."
+      "description": "Stores user profiles with isolated student PII, immutable privileged fields, and allowlisted updates."
+    },
+    "/admins/{adminId}": {
+      "schema": "AdminRecord",
+      "description": "Server/Console-provisioned admin authorization registry. Client writes are strictly forbidden."
     }
   }
 }

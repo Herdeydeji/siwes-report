@@ -79,6 +79,11 @@ export function StudentSettingsView({ onNavigate }: StudentSettingsViewProps) {
     e.preventDefault();
     if (!currentUser) return;
 
+    if (!fullName.trim() || !matricNumber.trim() || !department.trim() || !faculty.trim() || !programme.trim()) {
+      setError('Full name, faculty, department, programme, and matric number are required.');
+      return;
+    }
+
     setError('');
     setIsSaving(true);
 
@@ -87,9 +92,9 @@ export function StudentSettingsView({ onNavigate }: StudentSettingsViewProps) {
         fullName: fullName.trim(),
         phoneNumber: phoneNumber.trim(),
         institution,
-        faculty,
-        department,
-        programme,
+        faculty: faculty.trim(),
+        department: department.trim(),
+        programme: programme.trim(),
         matricNumber: matricNumber.trim(),
         academicLevel,
         academicSession,
@@ -98,6 +103,8 @@ export function StudentSettingsView({ onNavigate }: StudentSettingsViewProps) {
           organisationAddress: organisationAddress.trim(),
           supervisorName: supervisorName.trim(),
           supervisorDesignation: supervisorDesignation.trim(),
+          ...(userProfile?.placement?.startDate ? { startDate: userProfile.placement.startDate } : {}),
+          ...(userProfile?.placement?.endDate ? { endDate: userProfile.placement.endDate } : {}),
         },
       });
 

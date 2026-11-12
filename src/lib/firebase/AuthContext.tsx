@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { User, onAuthStateChanged } from 'firebase/auth';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { User, onAuthStateChanged, reload } from 'firebase/auth';
 import { auth, testFirestoreConnection } from './config';
 import {
   registerStudent,
@@ -15,7 +15,6 @@ import {
   reloadStudentUser,
   getStudentProfile,
   saveStudentOnboarding,
-  updateStudentProfile,
 } from './authService';
 import { UserProfile } from '../types';
 
@@ -40,9 +39,13 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authEmailVerified, setAuthEmailVerified] = useState<boolean>(false);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isAuthReady, setIsAuthReady] = useState<boolean>(false);
+
+  // Monotonic token to prevent stale async auth callbacks from overwriting newer auth state
+  const authSyncIdRef = useRef(0);
 
   // Probe Firestore on mount
   useEffect(() => {
@@ -51,26 +54,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  // Listen for Firebase auth state changes
+  // Listen for Firebase auth state changes and restore session cleanly on refresh
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      const syncId = ++authSyncIdRef.current;
       setIsLoading(true);
-      setCurrentUser(user);
 
       if (user) {
+        // Reload Auth user on session restoration so emailVerified reflects live Firebase Auth state
         try {
-          const profile = await getStudentProfile(user.uid);
+          await reload(user);
+        } catch (err) {
+          console.warn('Auth reload notice during session restore:', err);
+        }
+
+        if (syncId !== authSyncIdRef.current) return;
+
+        const freshUser = auth.currentUser || user;
+        setCurrentUser(freshUser);
+        setAuthEmailVerified(Boolean(freshUser.emailVerified));
+
+        try {
+          const profile = await getStudentProfile(freshUser.uid);
+          if (syncId !== authSyncIdRef.current) return;
           setUserProfile(profile);
         } catch (err) {
           console.error('Error fetching user profile from Firestore:', err);
+          if (syncId !== authSyncIdRef.current) return;
           setUserProfile(null);
         }
       } else {
+        setCurrentUser(null);
+        setAuthEmailVerified(false);
         setUserProfile(null);
       }
 
-      setIsLoading(false);
-      setIsAuthReady(true);
+      if (syncId === authSyncIdRef.current) {
+        setIsLoading(false);
+        setIsAuthReady(true);
+      }
     });
 
     return () => {
@@ -84,6 +106,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         const { user, profile } = await registerStudent(email, password, fullName);
         setCurrentUser(user);
+        setAuthEmailVerified(Boolean(user.emailVerified));
         setUserProfile(profile);
       } finally {
         setIsLoading(false);
@@ -96,8 +119,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setIsLoading(true);
     try {
       const user = await loginStudent(email, password);
-      setCurrentUser(user);
-      const profile = await getStudentProfile(user.uid);
+      try {
+        await reload(user);
+      } catch {
+        // Use credential user state if reload fails transiently
+      }
+      const freshUser = auth.currentUser || user;
+      setCurrentUser(freshUser);
+      setAuthEmailVerified(Boolean(freshUser.emailVerified));
+      const profile = await getStudentProfile(freshUser.uid);
       setUserProfile(profile);
     } finally {
       setIsLoading(false);
@@ -109,6 +139,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       await logoutStudent();
       setCurrentUser(null);
+      setAuthEmailVerified(false);
       setUserProfile(null);
     } finally {
       setIsLoading(false);
@@ -116,27 +147,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const resendVerification = useCallback(async () => {
-    if (!currentUser) throw new Error('No authenticated user session found.');
-    await resendStudentEmailVerification(currentUser);
+    const activeUser = auth.currentUser || currentUser;
+    if (!activeUser) throw new Error('No authenticated user session found.');
+    await resendStudentEmailVerification(activeUser);
   }, [currentUser]);
 
+  /**
+   * Reloads Firebase Authentication user state.
+   * Firebase Authentication (`currentUser.emailVerified`) is the sole authoritative source;
+   * client code never writes `emailVerified` to Firestore.
+   */
   const checkVerificationStatus = useCallback(async (): Promise<boolean> => {
-    if (!currentUser) return false;
-    const reloaded = await reloadStudentUser(currentUser);
-    setCurrentUser(reloaded);
+    const activeUser = auth.currentUser || currentUser;
+    if (!activeUser) return false;
 
-    // If verified now, update Firestore profile record if needed
-    if (reloaded.emailVerified && userProfile && !userProfile.emailVerified) {
+    const reloaded = await reloadStudentUser(activeUser);
+    const verified = Boolean(reloaded.emailVerified);
+    setCurrentUser(reloaded);
+    setAuthEmailVerified(verified);
+
+    if (verified) {
       try {
-        await updateStudentProfile(reloaded.uid, { emailVerified: true });
-        setUserProfile((prev) => (prev ? { ...prev, emailVerified: true } : null));
+        const profile = await getStudentProfile(reloaded.uid);
+        setUserProfile(profile);
       } catch (err) {
-        console.warn('Could not update emailVerified flag in Firestore:', err);
+        console.warn('Could not refresh profile after verification check:', err);
       }
     }
 
-    return reloaded.emailVerified;
-  }, [currentUser, userProfile]);
+    return verified;
+  }, [currentUser]);
 
   const sendPasswordReset = useCallback(async (email: string) => {
     await sendStudentPasswordReset(email);
@@ -144,11 +184,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const completeOnboarding = useCallback(
     async (data: Partial<UserProfile>) => {
-      if (!currentUser) throw new Error('No authenticated user session found.');
+      const activeUser = auth.currentUser || currentUser;
+      if (!activeUser) throw new Error('No authenticated user session found.');
+      if (!activeUser.emailVerified) {
+        throw new Error('Please verify your email address before completing onboarding.');
+      }
+
       setIsLoading(true);
       try {
-        await saveStudentOnboarding(currentUser.uid, data);
-        const updated = await getStudentProfile(currentUser.uid);
+        await saveStudentOnboarding(activeUser.uid, data);
+        const updated = await getStudentProfile(activeUser.uid);
         setUserProfile(updated);
       } finally {
         setIsLoading(false);
@@ -158,17 +203,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const refreshProfile = useCallback(async () => {
-    if (!currentUser) return;
+    const activeUser = auth.currentUser || currentUser;
+    if (!activeUser) return;
     try {
-      const profile = await getStudentProfile(currentUser.uid);
+      const profile = await getStudentProfile(activeUser.uid);
       setUserProfile(profile);
     } catch (err) {
       console.error('Error refreshing profile:', err);
     }
   }, [currentUser]);
 
-  const isEmailVerified = Boolean(currentUser?.emailVerified);
-  const onboardingCompleted = Boolean(userProfile?.onboardingCompleted);
+  // Firebase Auth is strictly authoritative for email verification;
+  // Firestore profile fields cannot independently grant verified status.
+  const isEmailVerified = Boolean(currentUser && authEmailVerified);
+  const onboardingCompleted = Boolean(currentUser && authEmailVerified && userProfile?.onboardingCompleted);
 
   return (
     <AuthContext.Provider

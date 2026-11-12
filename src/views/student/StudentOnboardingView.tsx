@@ -132,6 +132,11 @@ export function StudentOnboardingView({ onNavigate }: StudentOnboardingViewProps
       return;
     }
 
+    if (!faculty.trim()) {
+      setError('Please provide your faculty or school.');
+      return;
+    }
+
     if (!department.trim()) {
       setError('Please provide your department.');
       return;
@@ -160,9 +165,9 @@ export function StudentOnboardingView({ onNavigate }: StudentOnboardingViewProps
         fullName: fullName.trim(),
         phoneNumber: phoneNumber.trim(),
         institution,
-        faculty,
-        department,
-        programme: programme || department,
+        faculty: faculty.trim(),
+        department: department.trim(),
+        programme: (programme || department).trim(),
         matricNumber: matricNumber.trim(),
         academicLevel,
         academicSession,
@@ -180,7 +185,7 @@ export function StudentOnboardingView({ onNavigate }: StudentOnboardingViewProps
       onNavigate('/dashboard');
     } catch (err: any) {
       console.error('Failed to save onboarding:', err);
-      setError('Failed to save onboarding details to Firestore. Please try again.');
+      setError('Failed to save onboarding details to Firestore. Please ensure your email is verified and all fields are valid.');
     } finally {
       setIsSaving(false);
     }

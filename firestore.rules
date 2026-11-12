@@ -12,56 +12,207 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isVerifiedAuth() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
     function isOwner(userId) {
       return isSignedIn() && request.auth.uid == userId;
     }
 
     function isAdmin() {
-      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+      return isVerifiedAuth() &&
+             exists(/databases/$(database)/documents/admins/$(request.auth.uid));
     }
 
     function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    function incoming() {
-      return request.resource.data;
+    function optStr(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
     }
 
-    function existing() {
-      return resource.data;
+    function isValidPlacement(placement) {
+      return placement is map &&
+             placement.keys().hasOnly([
+               'organisationName',
+               'organisationAddress',
+               'supervisorName',
+               'supervisorDesignation',
+               'startDate',
+               'endDate'
+             ]) &&
+             optStr(placement, 'organisationName', 150) &&
+             optStr(placement, 'organisationAddress', 250) &&
+             optStr(placement, 'supervisorName', 120) &&
+             optStr(placement, 'supervisorDesignation', 100) &&
+             optStr(placement, 'startDate', 30) &&
+             optStr(placement, 'endDate', 30);
     }
 
-    // User Profile Validation Blueprint
+    // Validation Blueprint for UserProfile (shared on create & update; no resource/diff calls)
     function isValidUserProfile(data) {
-      return data.uid is string && data.uid.size() <= 128 &&
-             data.fullName is string && data.fullName.size() > 0 && data.fullName.size() <= 120 &&
-             data.email is string && data.email.size() > 0 && data.email.size() <= 120 &&
-             data.role in ['student', 'admin'];
+      return data.keys().hasAll([
+               'uid',
+               'fullName',
+               'email',
+               'role',
+               'emailVerified',
+               'onboardingCompleted',
+               'createdAt',
+               'updatedAt'
+             ]) &&
+             data.keys().hasOnly([
+               'uid',
+               'fullName',
+               'email',
+               'phoneNumber',
+               'role',
+               'emailVerified',
+               'onboardingCompleted',
+               'institution',
+               'faculty',
+               'department',
+               'programme',
+               'matricNumber',
+               'academicLevel',
+               'academicSession',
+               'placement',
+               'avatarUrl',
+               'createdAt',
+               'updatedAt'
+             ]) &&
+             isValidId(data.uid) &&
+             data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+             data.email is string && data.email.size() >= 3 && data.email.size() <= 120 &&
+             data.role in ['student', 'admin'] &&
+             data.emailVerified is bool &&
+             data.onboardingCompleted is bool &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp &&
+             optStr(data, 'phoneNumber', 20) &&
+             optStr(data, 'institution', 150) &&
+             optStr(data, 'faculty', 100) &&
+             optStr(data, 'department', 100) &&
+             optStr(data, 'programme', 100) &&
+             optStr(data, 'matricNumber', 50) &&
+             optStr(data, 'academicLevel', 30) &&
+             optStr(data, 'academicSession', 30) &&
+             optStr(data, 'avatarUrl', 500) &&
+             (!('placement' in data) || isValidPlacement(data.placement));
+    }
+
+    // Ensures onboardingCompleted can only become true when mandatory academic & placement fields are populated
+    // (Types and maxLengths are already verified by isValidUserProfile)
+    function hasCompletedOnboardingData(data) {
+      return data.keys().hasAll([
+               'institution',
+               'faculty',
+               'department',
+               'programme',
+               'matricNumber',
+               'academicLevel',
+               'academicSession',
+               'placement'
+             ]) &&
+             data.institution.size() > 0 &&
+             data.faculty.size() > 0 &&
+             data.department.size() > 0 &&
+             data.programme.size() > 0 &&
+             data.matricNumber.size() >= 3 &&
+             data.academicLevel.size() > 0 &&
+             data.academicSession.size() > 0 &&
+             ('organisationName' in data.placement) &&
+             data.placement.organisationName.size() > 0;
+    }
+
+    function unchangedStudentImmutableFields(nextData, prevData) {
+      return nextData.uid == prevData.uid &&
+             nextData.role == prevData.role &&
+             nextData.email == prevData.email &&
+             nextData.emailVerified == prevData.emailVerified &&
+             nextData.createdAt == prevData.createdAt;
+    }
+
+    // Administrators Collection (Strictly Server/Console Managed)
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && isAdmin();
+      allow list: if isAdmin();
+      allow create, update, delete: if false;
     }
 
     // Users Collection
     match /users/{userId} {
-      // PII Protection: Only the account owner or verified admin may read a student profile
+      // PII Protection: Only the account owner or a verified administrator may read a profile
       allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
       allow list: if isAdmin();
 
-      // Registration: Account owner can create their own profile, MUST have role 'student'
-      // Forbids self-assignment of admin role
+      // Registration: Account owner initializes own student profile before email verification
       allow create: if isValidId(userId) &&
                        isOwner(userId) &&
-                       isValidUserProfile(incoming()) &&
-                       incoming().uid == userId &&
-                       incoming().role == 'student';
+                       isValidUserProfile(request.resource.data) &&
+                       request.resource.data.keys().hasOnly([
+                         'uid',
+                         'fullName',
+                         'email',
+                         'role',
+                         'emailVerified',
+                         'onboardingCompleted',
+                         'createdAt',
+                         'updatedAt'
+                       ]) &&
+                       request.resource.data.uid == userId &&
+                       request.resource.data.role == 'student' &&
+                       ('email' in request.auth.token) &&
+                       request.resource.data.email == request.auth.token.email &&
+                       request.resource.data.emailVerified == false &&
+                       request.resource.data.onboardingCompleted == false &&
+                       request.resource.data.createdAt == request.time &&
+                       request.resource.data.updatedAt == request.time;
 
-      // Updates: Account owner can update academic/placement fields but CANNOT escalate role or alter immutable fields
+      // Updates: Verified owner can ONLY update allowlisted personal/academic/placement fields
+      // or transition onboardingCompleted false -> true when mandatory onboarding fields are complete.
+      // Immutable/privileged fields (uid, role, email, emailVerified, createdAt) cannot be modified by students.
       allow update: if isValidId(userId) &&
-                       isOwner(userId) &&
-                       isValidUserProfile(incoming()) &&
-                       incoming().uid == existing().uid &&
-                       incoming().role == existing().role &&
-                       incoming().email == existing().email &&
-                       (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt);
+                       isValidUserProfile(request.resource.data) &&
+                       (
+                         (
+                           isOwner(userId) &&
+                           isVerifiedAuth() &&
+                           unchangedStudentImmutableFields(request.resource.data, resource.data) &&
+                           request.resource.data.updatedAt == request.time &&
+                           request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                             'fullName',
+                             'phoneNumber',
+                             'institution',
+                             'faculty',
+                             'department',
+                             'programme',
+                             'matricNumber',
+                             'academicLevel',
+                             'academicSession',
+                             'placement',
+                             'avatarUrl',
+                             'onboardingCompleted',
+                             'updatedAt'
+                           ]) &&
+                           (
+                             request.resource.data.onboardingCompleted == resource.data.onboardingCompleted ||
+                             (
+                               resource.data.onboardingCompleted == false &&
+                               request.resource.data.onboardingCompleted == true &&
+                               hasCompletedOnboardingData(request.resource.data)
+                             )
+                           )
+                         ) ||
+                         (
+                           isAdmin() &&
+                           request.resource.data.uid == resource.data.uid &&
+                           request.resource.data.createdAt == resource.data.createdAt &&
+                           request.resource.data.updatedAt == request.time
+                         )
+                       );
 
       allow delete: if isAdmin();
     }
