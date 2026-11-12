@@ -1,0 +1,45 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Student or administrator account profile in SIWES Studio",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "email": { "type": "string", "maxLength": 120 },
+        "phoneNumber": { "type": "string", "maxLength": 20 },
+        "role": { "type": "string", "enum": ["student", "admin"] },
+        "emailVerified": { "type": "boolean" },
+        "onboardingCompleted": { "type": "boolean" },
+        "institution": { "type": "string", "maxLength": 150 },
+        "faculty": { "type": "string", "maxLength": 100 },
+        "department": { "type": "string", "maxLength": 100 },
+        "programme": { "type": "string", "maxLength": 100 },
+        "matricNumber": { "type": "string", "maxLength": 50 },
+        "academicLevel": { "type": "string", "maxLength": 30 },
+        "academicSession": { "type": "string", "maxLength": 30 },
+        "placement": {
+          "type": "object",
+          "properties": {
+            "organisationName": { "type": "string", "maxLength": 150 },
+            "organisationAddress": { "type": "string", "maxLength": 250 },
+            "supervisorName": { "type": "string", "maxLength": 120 },
+            "supervisorDesignation": { "type": "string", "maxLength": 100 },
+            "startDate": { "type": "string", "maxLength": 30 },
+            "endDate": { "type": "string", "maxLength": 30 }
+          }
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "fullName", "email", "role"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Stores user profiles with isolated student data and immutable roles."
+    }
+  }
+}

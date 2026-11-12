@@ -1,0 +1,8 @@
+{
+  "name": "SIWES Studio",
+  "description": "Professional SIWES technical report preparation platform for Nigerian tertiary institution students, transforming industrial training logbooks into compliant academic reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,69 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Deny All Fallback
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Security Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // User Profile Validation Blueprint
+    function isValidUserProfile(data) {
+      return data.uid is string && data.uid.size() <= 128 &&
+             data.fullName is string && data.fullName.size() > 0 && data.fullName.size() <= 120 &&
+             data.email is string && data.email.size() > 0 && data.email.size() <= 120 &&
+             data.role in ['student', 'admin'];
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      // PII Protection: Only the account owner or verified admin may read a student profile
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+
+      // Registration: Account owner can create their own profile, MUST have role 'student'
+      // Forbids self-assignment of admin role
+      allow create: if isValidId(userId) &&
+                       isOwner(userId) &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().uid == userId &&
+                       incoming().role == 'student';
+
+      // Updates: Account owner can update academic/placement fields but CANNOT escalate role or alter immutable fields
+      allow update: if isValidId(userId) &&
+                       isOwner(userId) &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().uid == existing().uid &&
+                       incoming().role == existing().role &&
+                       incoming().email == existing().email &&
+                       (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt);
+
+      allow delete: if isAdmin();
+    }
+  }
+}
